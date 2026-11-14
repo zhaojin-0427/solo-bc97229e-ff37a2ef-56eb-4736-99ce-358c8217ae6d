@@ -20,7 +20,7 @@ import os
 from flask import Flask, jsonify, render_template, request
 
 from . import replica_db, source_db
-from .sync import SyncEngine
+from .sync import SyncEngine, reconcile_source
 
 SOURCE_DB = os.environ.get("SOURCE_DB", "/data/source/specimens.db")
 REPLICA_DB = os.environ.get("REPLICA_DB", "/data/replica/specimens_replica.db")
@@ -47,6 +47,14 @@ def create_app(
     # 确保示例源库与副本结构存在（源库不存在则播种演示数据）
     source_db.init_demo(source_path)
     replica_db.init_replica(replica_path)
+    # 关键：在应用开始接受任何查询之前完成来源对账。
+    # 同一源库的普通重启 -> 按持久进度增量续跑；
+    # 检测到换库 -> 旧副本立即置为 REBUILDING 并清空，网页首个查询就只能
+    # 得到 503，直到新库数据、来源标识、进度在同一事务持久化后才重新开放。
+    try:
+        reconcile_source(source_path, replica_path)
+    except Exception as exc:  # 源库暂时不可读时，引擎启动后会记录 ERROR
+        app.logger.warning("启动来源对账失败，交由同步引擎处理: %s", exc)
     if do_auto_start:
         engine.start()
 

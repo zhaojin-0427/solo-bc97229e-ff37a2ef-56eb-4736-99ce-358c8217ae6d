@@ -15,11 +15,12 @@ import sqlite3
 from contextlib import contextmanager
 
 # 同步阶段
-PHASE_INIT = "INIT"          # 尚未开始 / 初次复制未完成
+PHASE_INIT = "INIT"            # 尚未开始 / 初次复制未完成
 PHASE_BOOTSTRAP = "BOOTSTRAP"  # 正在做首次后台复制
-PHASE_RUNNING = "RUNNING"    # 已就绪，持续增量同步
-PHASE_STOPPED = "STOPPED"    # 被用户停止
-PHASE_ERROR = "ERROR"        # 同步出错
+PHASE_RUNNING = "RUNNING"      # 已就绪，持续增量同步
+PHASE_STOPPED = "STOPPED"      # 被用户停止
+PHASE_ERROR = "ERROR"          # 同步出错
+PHASE_REBUILDING = "REBUILDING"  # 检测到换库，正在重建副本（旧数据已失效不可查）
 
 
 class _ReplicaConnection(sqlite3.Connection):
@@ -52,7 +53,7 @@ def open_replica(path: str):
 
 
 def init_replica(path: str) -> None:
-    """创建副本结构（幂等）。"""
+    """创建副本结构（幂等），并把旧版副本迁移到当前结构。"""
     with open_replica(path) as conn:
         conn.execute(
             """
@@ -76,6 +77,14 @@ def init_replica(path: str) -> None:
             )
             """
         )
+        # 轻量迁移：为旧版本副本补充来源标识/重建计数字段
+        existing = {r["name"] for r in conn.execute("PRAGMA table_info(sync_meta)")}
+        if "source_uid" not in existing:
+            conn.execute("ALTER TABLE sync_meta ADD COLUMN source_uid TEXT")
+        if "rebuild_count" not in existing:
+            conn.execute(
+                "ALTER TABLE sync_meta ADD COLUMN rebuild_count INTEGER NOT NULL DEFAULT 0"
+            )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS _applied_changes (
@@ -99,6 +108,8 @@ def get_meta(path: str) -> dict:
         "source_max_seq": 0,
         "bootstrap_copied": 0,
         "last_error": None,
+        "source_uid": None,
+        "rebuild_count": 0,
     }
     if not os.path.exists(path):
         return fallback
@@ -127,10 +138,12 @@ def get_specimen(path: str, specimen_id: int):
         return dict(row) if row is not None else None
 
 
-def reset_for_bootstrap(path: str) -> None:
-    """初次复制（重新）开始：清空一切派生数据，回到 INIT 进度。
+def reset_for_bootstrap(path: str, *, phase: str = PHASE_BOOTSTRAP) -> None:
+    """初次复制（重新）开始：清空一切派生数据，回到零进度。
 
     初次复制中断后重做时调用，保证半成品快照不会残留。
+    ``phase`` 允许调用方区分普通 BOOTSTRAP 与换库后的 REBUILDING。
+    注意：不修改 source_uid / rebuild_count，来源标识由重建完成事务写入。
     """
     with open_replica(path) as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -144,6 +157,33 @@ def reset_for_bootstrap(path: str) -> None:
                    updated_at = datetime('now')
              WHERE id = 1
             """,
-            (PHASE_BOOTSTRAP,),
+            (phase,),
+        )
+        conn.execute("COMMIT")
+
+
+def invalidate_for_rebuild(path: str) -> None:
+    """检测到换库后、重建开始前让旧副本立即不可查。
+
+    在同一个事务内：阶段置为 REBUILDING（is_ready 立即返回 False，网页查询
+    持续 503）、清空旧库派生数据与审计流水、进度归零；仅对“真正开始一次新
+    重建”递增 rebuild_count——上次重建中断（last_applied_seq 仍为 0）后的
+    重试不重复计数。旧 source_uid 保留为排查信息，待重建完成事务原子覆盖。
+    """
+    with open_replica(path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DELETE FROM specimens")
+        conn.execute("DELETE FROM _applied_changes")
+        conn.execute(
+            """
+            UPDATE sync_meta
+               SET phase = ?, last_applied_seq = 0, source_max_seq = 0,
+                   bootstrap_copied = 0, last_error = NULL,
+                   rebuild_count = rebuild_count
+                       + CASE WHEN last_applied_seq > 0 THEN 1 ELSE 0 END,
+                   updated_at = datetime('now')
+             WHERE id = 1
+            """,
+            (PHASE_REBUILDING,),
         )
         conn.execute("COMMIT")

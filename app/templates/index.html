@@ -31,7 +31,7 @@
            font-weight:600; color:#fff; }
   .b-RUNNING { background:var(--ok); } .b-BOOTSTRAP { background:var(--warn); }
   .b-INIT { background:#6b7a70; } .b-STOPPED { background:#555f59; }
-  .b-ERROR { background:var(--err); }
+  .b-ERROR { background:var(--err); } .b-REBUILDING { background:#8e44ad; }
   button { border:0; border-radius:7px; padding:9px 16px; font-size:14px;
            cursor:pointer; font-weight:600; }
   button.primary { background:var(--brand); color:#fff; }
@@ -75,6 +75,10 @@
       <span class="v" id="lastSeq">—</span></div>
     <div class="row"><span class="k">源库当前最大序号</span><span class="v" id="srcMax">—</span></div>
     <div class="row"><span class="k">首次复制已拷贝行数</span><span class="v" id="copied">—</span></div>
+    <div class="row"><span class="k">副本记录的来源标识 (source_uid)</span>
+      <span class="v" id="repUid">—</span></div>
+    <div class="row"><span class="k">换库重建次数 (rebuild_count)</span>
+      <span class="v" id="rebuilds">—</span></div>
     <div class="row"><span class="k">源库存量 / 已处理批次</span>
       <span class="v"><span id="srcCount">—</span> / <span id="batches">—</span></span></div>
     <div class="bar"><i id="bar"></i></div>
@@ -93,7 +97,8 @@
     <input id="qid" type="number" min="1" placeholder="例如 3">
     <button class="primary" id="btnQuery">查询副本</button>
     <div class="muted" style="margin-top:8px">
-      副本仅在 RUNNING（首次复制完成）后可查；未就绪时接口返回 503。
+      副本仅在 RUNNING（首次复制完成 / 换库重建完成）后可查；BOOTSTRAP 与
+      REBUILDING（换库重建中，旧数据已失效）期间接口返回 503。
     </div>
     <pre id="qresult" style="margin-top:10px">等待查询…</pre>
   </section>
@@ -159,6 +164,9 @@ async function refresh() {
   $("lastSeq").textContent = data.last_applied_seq;
   $("srcMax").textContent = data.source_max_seq;
   $("copied").textContent = data.bootstrap_copied;
+  $("repUid").textContent = data.source_uid
+    ? data.source_uid.slice(0, 12) + "…" : "（尚未绑定来源）";
+  $("rebuilds").textContent = data.rebuild_count ?? 0;
   $("batches").textContent = data.total_batches;
   $("srcCount").textContent = data.source && data.source.specimen_count;
   $("error").textContent = data.last_error || "—";

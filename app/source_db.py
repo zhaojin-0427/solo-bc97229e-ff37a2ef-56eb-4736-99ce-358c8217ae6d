@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import uuid
 from contextlib import contextmanager
 
 # 同步器在快照阶段逐页读取的行数
@@ -109,8 +110,49 @@ def init_source(path: str) -> None:
             END
             """
         )
+        # 来源标识：每个物理源库在初始化时生成一个持久且唯一的 UID。
+        # 数据工程师用另一份 SQLite 库替换原路径时，新库（经本模块初始化）
+        # 必然携带不同 UID，即使两个库的变更日志序号完全相同也能区分。
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS _source_identity (
+                id         INTEGER PRIMARY KEY CHECK (id = 1),
+                source_uid TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO _source_identity(id, source_uid)
+            VALUES (1, ?)
+            """,
+            (uuid.uuid4().hex,),
+        )
     finally:
         conn.close()
+
+
+def ensure_source_uid(path: str) -> str:
+    """确保源库存在来源标识并返回其 UID（写连接，会补建标识表）。"""
+    init_source(path)
+    return source_uid(path)
+
+
+def source_uid(path: str) -> str | None:
+    """只读返回源库 UID；库缺失/标识尚未建立时返回 None，不抛异常。"""
+    if not os.path.exists(path):
+        return None
+    conn = connect(path, readonly=True)
+    try:
+        row = conn.execute(
+            "SELECT source_uid FROM _source_identity WHERE id = 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    finally:
+        conn.close()
+    return row["source_uid"] if row is not None else None
 
 
 def backfill_change_log(path: str) -> int:
