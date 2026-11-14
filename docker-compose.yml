@@ -1,0 +1,43 @@
+services:
+  web:
+    build: .
+    image: museum-sync:latest
+    container_name: museum-sync-web
+    ports:
+      - "8000:8000"
+    environment:
+      SOURCE_DB: /data/source/specimens.db
+      REPLICA_DB: /data/replica/specimens_replica.db
+      POLL_INTERVAL: "1.0"
+      AUTO_START: "1"
+      SNAPSHOT_PAGE_SIZE: "500"
+      CHANGE_BATCH_SIZE: "500"
+    volumes:
+      - source_data:/data/source
+      - replica_data:/data/replica
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  # 可选的持续演示写入器（模拟鉴定员不断增/改/撤源记录）：
+  #   docker compose --profile mutator up -d
+  mutator:
+    image: museum-sync:latest
+    container_name: museum-sync-mutator
+    profiles: ["mutator"]
+    entrypoint: ["python", "-m", "scripts.demo_mutator"]
+    depends_on:
+      - web
+    environment:
+      SOURCE_DB: /data/source/specimens.db
+      MUTATOR_INTERVAL: "3"
+    volumes:
+      - source_data:/data/source
+    restart: unless-stopped
+
+volumes:
+  source_data:
+  replica_data:
